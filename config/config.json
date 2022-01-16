@@ -1,0 +1,20 @@
+{
+    "model": {
+        "n_layers": 6,
+        "n_position": 200,
+        "d_model": 256,
+        "d_ff": 2048,
+        "n_head": 8,
+        "dropout_p": 0.1
+    },
+    "train": {
+        "batch_size": 30,
+        "max_epoch": 18,
+        "step_batch": 26,
+        "beta1": 0.9,
+        "beta2": 0.98,
+        "warmup": 4000,
+        "eval_interval": 10000,
+        "smoothing": 0.1
+    }
+}
