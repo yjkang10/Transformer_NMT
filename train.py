@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
     model = Transformer(V, embedding_dim=d_model, max_sent=max_sent, dropout_p=dropout_p, 
                         n_layers=n_layers, d_model=d_model, d_k=d_k, d_ff=d_ff, 
-                        n_head=n_head, device=device, pad_idx=pad_idx)
+                        n_head=n_head, device=device, pad_idx=pad_idx).to(device)
     criterion = LabelSmoothing(smoothing, V, pad_idx)
     optimizer = torch.optim.Adam(model.parameters(), lr=0, betas=(beta1, beta2), eps=1e-9)
     scaler = amp.GradScaler()
