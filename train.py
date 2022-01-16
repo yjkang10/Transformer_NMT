@@ -111,7 +111,7 @@ if __name__ == '__main__':
                 tb_writer.flush()
                 total_loss = 0
                 
-            if stack > 1 and stack % eval_interval == 1:
+            if stack % eval_interval == 1:
                 elapsed = (time.time() - start)/60
                 print("Step: %d | Loss: %f | Time: %f[min]" %(step_num, loss, elapsed))
                 start = time.time()
