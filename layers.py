@@ -3,85 +3,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, max_sent, embedding_dim, device):
-        """
-        positional encoding
-        embedding_dim = d_model
-        """
-        super().__init__()
-        self.pos_encoding = torch.empty(max_sent, embedding_dim)
-        for pos in range(max_sent):
-            for i in range(embedding_dim//2):
-                div_term = pos / (10000**(2*i/embedding_dim))
-                div_term = torch.FloatTensor([div_term])
-                self.pos_encoding[pos][2*i] = torch.sin(div_term)
-                self.pos_encoding[pos][2*i+1] = torch.cos(div_term)
-        self.pos_encoding = self.pos_encoding.to(device)
-
-    def forward(self, x):
-        """
-        |x| = (batch_size, max_sent, embedding_dim)
-        """
-        return x + self.pos_encoding
-
-class EmbedLayer(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, max_sent, dropout_p, device, pad_idx=0):
-        super().__init__()
-        self.embedding_dim = embedding_dim
-        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)   
-        self.position = PositionalEncoding(max_sent, embedding_dim, device)
-        self.dropout = nn.Dropout(dropout_p)
-        self.init_weight()
-
-    def init_weight(self):
-        nn.init.xavier_uniform_(self.embedding.weight)
-
-    def forward(self, x):
-        """
-        input |x| = (batch_size, max_sent)
-        output |x| = (batch_size, max_sent, embedding_dim)
-        """
-        x = self.embedding(x)
-        x *= self.embedding_dim ** 0.5
-        x = self.position(x)
-        return self.dropout(x)
-
-
 class Attention(nn.Module):
-    def __init__(self, d_k, dropout_p, device):
+    def __init__(self, d_k):
         super().__init__()
         self.d_k = d_k
-        self.device = device
-        self.dropout = nn.Dropout(dropout_p)
+        self.softmax = nn.Softmax(dim=-1)
     
     def forward(self, q, k, v, mask=None):
         """
-        |q, k| = (batch_size, n_head, seq_len, d_k)
-        |v| = (batch_size, n_head, seq_len, d_v)
-        |mask| = (batch_size, 1, 1(or seq_len), seq_len)
+        |q| = (batch_size, m, d_model)
+        |k, v| = (batch_size, n, d_model)
+        |mask| = (batch_size, m, n)
+        |output| = (batch_size, m, d_model)
         """
         attn = torch.matmul(q, k.transpose(-1, -2))
-        attn = attn / (self.d_k ** 0.5)
+        # |attn| = (batch_size, m, n)
         if mask is not None:
-            attn += mask * (-1e9)
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-        return torch.matmul(attn, v), attn
+            # attn += mask * (-1e9)
+            attn.masked_fill_(mask, -float('inf'))
+        attn = self.softmax(attn / (self.d_k ** 0.5))
+        return torch.bmm(attn, v)  #
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, d_k, n_head, dropout_p, device):
+    def __init__(self, d_model, d_k, n_heads):
         super().__init__()
-        self.n_head = n_head
+        self.d_model = d_model
+        self.n_heads = n_heads
         self.d_k = d_k
+
         self.linear_q = nn.Linear(d_model, d_model, bias=False)
         self.linear_k = nn.Linear(d_model, d_model, bias=False)
         self.linear_v = nn.Linear(d_model, d_model, bias=False)
-        self.attention = Attention(d_k, dropout_p, device)
         self.linear = nn.Linear(d_model, d_model, bias=False)
-        self.dropout = nn.Dropout(dropout_p)
-        self.layer_norm = nn.LayerNorm(d_model)
-        self.att = None
+
+        self.attention = Attention(d_k)
         self.init_weight()
 
     def init_weight(self):
@@ -92,86 +47,112 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, q, k, v, mask=None):
         """
-        |q, k, v| = (batch_size, seq_len, embedding_dim)
-        |trg_mask| = (batch_size, 1, 1(or seq_len), seq_len)
-        |out| = (batch_size, seq_len, d_model)
+        |q| = (batch_size, m, d_model)
+        |k, v| = (batch_size, n, d_model)
+        |mask| = (batch_size, m, n)
+        |output| = (batch_size, m, d_model)
         """
-        batch_size, seq_len, _ = q.size()
-        residual = q.clone()
-        q = self.linear_q(q).view(batch_size, seq_len, self.n_head, self.d_k)
-        k = self.linear_k(k).view(batch_size, seq_len, self.n_head, self.d_k)
-        v = self.linear_v(v).view(batch_size, seq_len, self.n_head, self.d_k)
+        qw = self.linear_q(q).split(self.d_model // self.n_heads, dim=-1)
+        kw = self.linear_k(k).split(self.d_model // self.n_heads, dim=-1)
+        vw = self.linear_v(v).split(self.d_model // self.n_heads, dim=-1)
+        # |qw_i| = (batch_size, m, d_model/n_heads)
+        # |kw_i, vw_i| = (batch_size, n, d_model/n_heads)
 
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        qw = torch.cat(qw, dim=0)
+        kw = torch.cat(kw, dim=0)
+        vw = torch.cat(vw, dim=0)
+        # |qw| = (batch_size * n_heads, m, d_model/n_heads)
+        # |kw, vw| = (batch_size * n_heads, n, d_model/n_heads)
 
-        attn, self.att = self.attention(q, k, v, mask)  # (batch_size, n_head, seq_len, d_v)
-        attn = attn.transpose(1, 2)
-        attn = attn.contiguous().view(batch_size, seq_len, -1)  # (batch_size, seq_len, d_model)
-        out = self.linear(attn)
-        out = self.dropout(out)
-        out += residual
-        return self.layer_norm(out)
+        if mask is not None:
+            mask = torch.cat([mask for _ in range(self.n_heads)], dim=0)
+            # |mask| = (batch_size * n_heads, m, n)
 
-class PositionwiseFFNN(nn.Module):
-    def __init__(self, d_model, d_ff, dropout_p):
+        attn = self.attention(qw, kw, vw, mask)  
+        # (batch_size * n_heads, m, d_model/n_heads)
+        attn = attn.split(q.size(0), dim=0) 
+        # |attn_i| = (batch_size, m, d_model/n_heads)
+        return self.linear(torch.cat(attn, dim=-1)) 
+
+
+class Encoder(nn.Module):
+    def __init__(self, d_model, d_k, d_ff, n_heads, dropout_p):
         super().__init__()
-        self.linear1 = nn.Linear(d_model, d_ff)
-        self.relu = nn.ReLU()
-        self.linear2 = nn.Linear(d_ff, d_model)
-        self.dropout = nn.Dropout(dropout_p)
-        self.layer_norm = nn.LayerNorm(d_model)
-        self.init_weight()
+        self.multihead_attn = MultiHeadAttention(d_model, d_k, n_heads)
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.attn_dropout = nn.Dropout(dropout_p)
 
-    def init_weight(self):
-        nn.init.xavier_uniform_(self.linear1.weight)
-        nn.init.xavier_uniform_(self.linear2.weight)
-        nn.init.constant_(self.linear1.bias, 0)
-        nn.init.constant_(self.linear2.bias, 0)
+        self.ffnn = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.ReLU(),
+            nn.Linear(d_ff, d_model))
+        
+        self.ffnn_norm = nn.LayerNorm(d_model)
+        self.ffnn_dropout = nn.Dropout(dropout_p)
 
-    def forward(self, x):
+    def forward(self, x, mask):
         """
-        |x| = (batch_size, seq_len, d_model)
+        |x| = (batch_siz, n, d_model)
+        |mask| = (batch_size, n, n)
+        |return| = (batch_size, n, d_model)
         """
-        residual = x.clone()
-        x = self.relu(self.linear1(x))
-        x = self.linear2(x)
-        x = self.dropout(x)
-        x += residual
-        return self.layer_norm(x)
-
-
-class EncoderLayer(nn.Module):
-    def __init__(self, d_model, d_k, d_ff, n_head, dropout_p, device):
-        super().__init__()
-        self.multihead_attn = MultiHeadAttention(d_model, d_k, n_head, dropout_p, device)
-        self.pos_ffnn = PositionwiseFFNN(d_model, d_ff, dropout_p)
-
-    def forward(self, x, enc_pad_mask):
-        """
-        |x| = (batch_siz, max_sent, d_model)
-        |enc_mask| = (batch_size, 1, 1, seq_len)
-        |return| = (batch_size, seq_len, d_model)
-        """
-        out = self.multihead_attn(x, x, x, enc_pad_mask)
-        return self.pos_ffnn(out)
+        z = self.attn_norm(x)
+        z = x + self.attn_dropout(self.multihead_attn(z, z, z, mask))
+        return z + self.ffnn_dropout(self.ffnn(self.ffnn_norm(z))), mask
     
-class DecoderLayer(nn.Module):
-    def __init__(self, d_model, d_k, d_ff, n_head, dropout_p, device):
+class Decoder(nn.Module):
+    def __init__(self, d_model, d_k, d_ff, n_heads, dropout_p):
         super().__init__()
-        self.masked_multihead_attn = MultiHeadAttention(d_model, d_k, n_head, dropout_p, device)
-        self.attn_to_encoder = MultiHeadAttention(d_model, d_k, n_head, dropout_p, device)
-        self.pos_ffnn = PositionwiseFFNN(d_model, d_ff, dropout_p)
+        self.masked_attn = MultiHeadAttention(d_model, d_k, n_heads)
+        self.masked_attn_norm = nn.LayerNorm(d_model)
+        self.masked_attn_dropout = nn.Dropout(dropout_p)
 
-    def forward(self, x, enc_out, dec_mask, dec_pad_mask):
+        self.attn = MultiHeadAttention(d_model, d_k, n_heads)
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.attn_dropout = nn.Dropout(dropout_p)
+
+        self.ffnn = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.ReLU(),
+            nn.Linear(d_ff, d_model))
+        
+        self.ffnn_norm = nn.LayerNorm(d_model)
+        self.ffnn_dropout = nn.Dropout(dropout_p)
+
+    def forward(self, x, key_val, mask, prev, future_mask):
         """
-        |x| = (batch_size, seq_len, d_model)
-        |enc_out| = (batch_size, max_sent, d_model)
-        |dec_mask| = (batch_size, 1, seq_len, seq_len)
-        |dec_pad_mask| = (batch_size, 1, 1, seq_len)
-        |return| = (batch_size, seq_len, d_model)
+        |key_val| = (batch_size, n, d_model)
+        |mask| = (batch_size, m, n)
         """
-        self_attn = self.masked_multihead_attn(x, x, x, dec_mask)
-        attn_enc = self.attn_to_encoder(self_attn, enc_out, enc_out, dec_pad_mask)
-        return self.pos_ffnn(attn_enc)
+        if prev is None:  # training
+            # |x| = (batch_size, m, d_model)
+            # |future_mask| = (batch_size, m, m)
+            # |z| = (batch_size, m, d_model)
+            z = self.masked_attn_norm(x)
+            z = x + self.masked_attn_dropout(self.masked_attn(z, z, z, future_mask))
+
+        else:  # evaluation
+            # |x| = (batch_size, 1, d_model)
+            # |prev| = (batch_size, t-1, d_model)
+            # |future_mask| = None
+            # |z| = (batch_size, 1, d_model)
+            prev = self.masked_attn_norm(prev)
+            z = self.masked_attn_norm(x)
+            z = x + self.masked_attn_dropout(self.masked_attn(z, prev, prev, mask=None))
+             
+        key_val = self.attn_norm(key_val)
+        z += self.attn_dropout(self.attn(self.attn_norm(z), key_val, key_val, mask))
+        z += self.ffnn_dropout(self.ffnn(self.ffnn_norm(z)))
+
+        return z, key_val, mask, prev, future_mask
+
+class NewSequential(nn.Sequential):
+    def forward(self, *x):
+        """
+        nn.Sequential doesn't provide mutiple input arguments and returns.
+        """
+        for module in self._modules.values():
+            x = module(*x)
+        return x 
+    
+
