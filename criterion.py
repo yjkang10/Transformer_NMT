@@ -1,10 +1,9 @@
-from cProfile import label
 import torch
 import torch.nn as nn
 
 class LabelSmoothing(nn.Module):
     def __init__(self, label_smoothing, vocab_size, pad_idx=0):
-        self.criterion = nn.KLDivLoss(size_average=False)
+        self.criterion = nn.KLDivLoss(reduction='sum')
         self.pad_idx = pad_idx
         self.confidence = 1.0 - label_smoothing
         self.smoothing = label_smoothing

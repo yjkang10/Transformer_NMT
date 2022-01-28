@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class Attention(nn.Module):
     def __init__(self, d_k):
         super().__init__()
@@ -74,7 +73,6 @@ class MultiHeadAttention(nn.Module):
         # |attn_i| = (batch_size, m, d_model/n_heads)
         return self.linear(torch.cat(attn, dim=-1)) 
 
-
 class Encoder(nn.Module):
     def __init__(self, d_model, d_k, d_ff, n_heads, dropout_p):
         super().__init__()
@@ -84,7 +82,7 @@ class Encoder(nn.Module):
 
         self.ffnn = nn.Sequential(
             nn.Linear(d_model, d_ff),
-            nn.ReLU(),
+            nn.ReLU(inplace=False),
             nn.Linear(d_ff, d_model))
         
         self.ffnn_norm = nn.LayerNorm(d_model)
@@ -141,10 +139,11 @@ class Decoder(nn.Module):
             z = x + self.masked_attn_dropout(self.masked_attn(z, prev, prev, mask=None))
              
         key_val = self.attn_norm(key_val)
-        z += self.attn_dropout(self.attn(self.attn_norm(z), key_val, key_val, mask))
-        z += self.ffnn_dropout(self.ffnn(self.ffnn_norm(z)))
+        z = z + self.attn_dropout(self.attn(self.attn_norm(z), key_val, key_val, mask))
+        z = z + self.ffnn_dropout(self.ffnn(self.ffnn_norm(z)))
 
         return z, key_val, mask, prev, future_mask
+        
 
 class NewSequential(nn.Sequential):
     def forward(self, *x):
